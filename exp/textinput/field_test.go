@@ -18,7 +18,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/hajimehoshi/ebiten/v2/exp/textinput"
 )
@@ -27,9 +26,6 @@ func TestFieldGenerationZeroValue(t *testing.T) {
 	var f textinput.Field
 	if got := f.Generation(); got != 0 {
 		t.Errorf("fresh Field: Generation() = %d, want 0", got)
-	}
-	if got := f.ChangedAt(); !got.IsZero() {
-		t.Errorf("fresh Field: ChangedAt() = %v, want zero value", got)
 	}
 }
 
@@ -107,21 +103,16 @@ func TestFieldGenerationAdvancesOnContentChanges(t *testing.T) {
 			t.Cleanup(func() { f.Blur() })
 			tc.setup(&f)
 			beforeGen := f.Generation()
-			beforeAt := f.ChangedAt()
 			tc.mutate(&f)
 			if afterGen := f.Generation(); afterGen <= beforeGen {
 				t.Errorf("%s: Generation did not advance: before=%d after=%d", tc.name, beforeGen, afterGen)
-			}
-			if afterAt := f.ChangedAt(); !afterAt.After(beforeAt) {
-				t.Errorf("%s: ChangedAt did not advance: before=%v after=%v", tc.name, beforeAt, afterAt)
 			}
 		})
 	}
 }
 
-// Selection and focus changes advance ChangedAt (legacy contract) but not Generation
-// (new content-only contract).
-func TestFieldNonContentChangesAdvanceOnlyChangedAt(t *testing.T) {
+// Selection and focus changes should not advance Generation.
+func TestFieldNonContentChangesDoNotAdvanceGeneration(t *testing.T) {
 	testCases := []struct {
 		name   string
 		setup  func(*textinput.Field)
@@ -159,35 +150,11 @@ func TestFieldNonContentChangesAdvanceOnlyChangedAt(t *testing.T) {
 			t.Cleanup(func() { f.Blur() })
 			tc.setup(&f)
 			beforeGen := f.Generation()
-			beforeAt := f.ChangedAt()
 			tc.mutate(&f)
 			if afterGen := f.Generation(); afterGen != beforeGen {
 				t.Errorf("%s: Generation advanced on non-content change: before=%d after=%d", tc.name, beforeGen, afterGen)
 			}
-			if afterAt := f.ChangedAt(); !afterAt.After(beforeAt) {
-				t.Errorf("%s: ChangedAt did not advance: before=%v after=%v", tc.name, beforeAt, afterAt)
-			}
 		})
-	}
-}
-
-func TestFieldChangedAtStolenFocusAdvancesPreviousField(t *testing.T) {
-	var a, b textinput.Field
-	t.Cleanup(func() {
-		a.Blur()
-		b.Blur()
-	})
-	a.Focus()
-	before := a.ChangedAt()
-	b.Focus() // steals focus from a
-	if !a.ChangedAt().After(before) {
-		t.Errorf("a.ChangedAt did not advance when b stole focus: before=%v after=%v", before, a.ChangedAt())
-	}
-	if a.IsFocused() {
-		t.Errorf("a should no longer be focused")
-	}
-	if !b.IsFocused() {
-		t.Errorf("b should be focused")
 	}
 }
 
@@ -280,13 +247,9 @@ func TestFieldGenerationNoOpDoesNotAdvance(t *testing.T) {
 			t.Cleanup(func() { f.Blur() })
 			tc.setup(&f)
 			beforeGen := f.Generation()
-			beforeAt := f.ChangedAt()
 			tc.mutate(&f)
 			if afterGen := f.Generation(); afterGen != beforeGen {
 				t.Errorf("%s: Generation advanced on no-op: before=%d after=%d", tc.name, beforeGen, afterGen)
-			}
-			if afterAt := f.ChangedAt(); !afterAt.Equal(beforeAt) {
-				t.Errorf("%s: ChangedAt advanced on no-op: before=%v after=%v", tc.name, beforeAt, afterAt)
 			}
 		})
 	}
@@ -300,7 +263,6 @@ func TestFieldGenerationReadOnlyMethodsDoNotAdvance(t *testing.T) {
 	f.Focus()
 
 	priorGen := f.Generation()
-	priorAt := f.ChangedAt()
 
 	_ = f.Text()
 	_ = f.TextForRendering()
@@ -312,7 +274,6 @@ func TestFieldGenerationReadOnlyMethodsDoNotAdvance(t *testing.T) {
 	_ = f.CanUndo()
 	_ = f.CanRedo()
 	_ = f.UncommittedTextLengthInBytes()
-	_ = f.Handled()
 	var b strings.Builder
 	_, _ = f.WriteTextTo(&b)
 	b.Reset()
@@ -322,9 +283,6 @@ func TestFieldGenerationReadOnlyMethodsDoNotAdvance(t *testing.T) {
 
 	if got := f.Generation(); got != priorGen {
 		t.Errorf("read-only methods advanced Generation: before=%d after=%d", priorGen, got)
-	}
-	if got := f.ChangedAt(); !got.Equal(priorAt) {
-		t.Errorf("read-only methods advanced ChangedAt: before=%v after=%v", priorAt, got)
 	}
 }
 
@@ -675,23 +633,4 @@ func (r *fieldErrReader) Read(p []byte) (int, error) {
 	n := copy(p, r.data)
 	r.data = r.data[n:]
 	return n, nil
-}
-
-func TestFieldChangedAtStrictlyMonotonicUnderTightLoop(t *testing.T) {
-	var f textinput.Field
-	t.Cleanup(func() { f.Blur() })
-
-	const n = 1000
-	times := make([]time.Time, n)
-	for i := range n {
-		// Insert a character at the current end so each call is a real mutation.
-		f.ReplaceText("a", i, i)
-		times[i] = f.ChangedAt()
-	}
-	// Strict .After() across the whole sequence implies both ordering and uniqueness.
-	for i := range n - 1 {
-		if !times[i+1].After(times[i]) {
-			t.Errorf("index %d: timestamps not strictly increasing: %v <= %v", i+1, times[i+1], times[i])
-		}
-	}
 }

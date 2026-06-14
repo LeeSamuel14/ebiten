@@ -19,7 +19,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/hook"
 )
@@ -29,51 +28,36 @@ var (
 	theFocusedFieldM sync.Mutex
 )
 
-// focusField makes f the focused field. Any previously focused field is cleaned up
-// and its ChangedAt is bumped to reflect the focus loss.
+// focusField makes f the focused field. Any previously focused field is cleaned up.
 func focusField(f *Field) {
 	var origField *Field
-	var focused bool
-	// All ChangedAt bumps happen here, outside the mutex.
-	defer func() {
-		if focused {
-			f.bumpChangedAt()
-		}
-		if origField != nil {
-			origField.cleanUp()
-			// The previously focused field just lost focus, which is observable via IsFocused.
-			origField.bumpChangedAt()
-		}
-	}()
-
 	theFocusedFieldM.Lock()
-	defer theFocusedFieldM.Unlock()
 	if theFocusedField == f {
+		theFocusedFieldM.Unlock()
 		return
 	}
 	origField = theFocusedField
 	theFocusedField = f
-	focused = true
+	theFocusedFieldM.Unlock()
+	if origField != nil {
+		origField.cleanUp()
+	}
 }
 
-// blurField removes the focus from f. If f was focused, its ChangedAt is bumped.
+// blurField removes the focus from f.
 func blurField(f *Field) {
 	var origField *Field
-	// All ChangedAt bumps happen here, outside the mutex. origField is always f when set.
-	defer func() {
-		if origField != nil {
-			origField.cleanUp()
-			origField.bumpChangedAt()
-		}
-	}()
-
 	theFocusedFieldM.Lock()
-	defer theFocusedFieldM.Unlock()
 	if theFocusedField != f {
+		theFocusedFieldM.Unlock()
 		return
 	}
 	origField = theFocusedField
 	theFocusedField = nil
+	theFocusedFieldM.Unlock()
+	if origField != nil {
+		origField.cleanUp()
+	}
 }
 
 func isFieldFocused(f *Field) bool {
@@ -106,8 +90,7 @@ func init() {
 			return nil
 		}
 
-		handled, err := f.handleInput()
-		f.handled = handled
+		_, err := f.handleInput()
 		return err
 	})
 }
@@ -124,8 +107,7 @@ type Field struct {
 	selectionStartInBytes int
 	selectionEndInBytes   int
 
-	bounds  image.Rectangle
-	handled bool
+	bounds image.Rectangle
 
 	ch    <-chan textInputState
 	end   func()
@@ -133,7 +115,6 @@ type Field struct {
 	err   error
 
 	generation int64
-	changedAt  time.Time
 }
 
 // Generation returns a counter that advances when the field's renderable content changes.
@@ -149,35 +130,9 @@ func (f *Field) Generation() int64 {
 	return f.generation
 }
 
-// ChangedAt returns the time of the most recent state-changing mutation.
-//
-// ChangedAt is monotonically non-decreasing and advances on any observable state
-// change, including selection-only changes and focus changes. The zero value
-// indicates that no mutation has occurred.
-//
-// Deprecated: Use [Field.Generation] instead. Generation has stricter content-only
-// semantics (better suited for cache invalidation) and does not depend on the
-// system clock.
-func (f *Field) ChangedAt() time.Time {
-	return f.changedAt
-}
-
-// bumpChangedAt advances changedAt only. Used for state changes that are not content
-// changes (focus, selection). changedAt is forced strictly after its previous value
-// to keep equality checks meaningful even on platforms with a coarse clock.
-func (f *Field) bumpChangedAt() {
-	now := time.Now()
-	if !now.After(f.changedAt) {
-		now = f.changedAt.Add(time.Nanosecond)
-	}
-	f.changedAt = now
-}
-
-// bumpGeneration advances generation, and also bumps changedAt for the deprecated
-// [Field.ChangedAt] API. Used for content changes.
+// bumpGeneration advances generation. Used for content changes.
 func (f *Field) bumpGeneration() {
 	f.generation++
-	f.bumpChangedAt()
 }
 
 // setState assigns s to f.state, bumping generation when the visible composition state changes.
@@ -195,23 +150,6 @@ func (f *Field) setState(s textInputState) {
 	}
 }
 
-// SetBounds sets the bounds used for IME window positioning.
-// The bounds indicate the character position (e.g., cursor bounds) where the IME window should appear.
-// The bounds width doesn't matter very much as long as it is greater than 0.
-// The bounds height should be the text height like a cursor height.
-//
-// Call SetBounds when the bounds change, such as when the cursor position updates.
-// Unlike the deprecated [Field.HandleInputWithBounds], SetBounds does not need to be called every tick.
-func (f *Field) SetBounds(bounds image.Rectangle) {
-	f.bounds = bounds
-}
-
-// Handled reports whether the text inputting was handled in the current tick.
-// If Handled returns true, a Field user should not handle further input events.
-func (f *Field) Handled() bool {
-	return f.handled
-}
-
 // HandleInput updates the field state.
 // HandleInput must be called every tick, i.e., every Update, when Field is focused.
 // HandleInput takes a position where an IME window is shown if needed.
@@ -220,8 +158,6 @@ func (f *Field) Handled() bool {
 // If HandleInput returns true, a Field user should not handle further input events.
 //
 // HandleInput returns an error when handling input causes an error.
-//
-// Deprecated: use [Field.SetBounds] and [Field.Handled] instead.
 func (f *Field) HandleInput(x, y int) (handled bool, err error) {
 	return f.HandleInputWithBounds(image.Rect(x, y, x+1, y+1))
 }
@@ -236,15 +172,9 @@ func (f *Field) HandleInput(x, y int) (handled bool, err error) {
 // If HandleInputWithBounds returns true, a Field user should not handle further input events.
 //
 // HandleInputWithBounds returns an error when handling input causes an error.
-//
-// Deprecated: use [Field.SetBounds] and [Field.Handled] instead.
 func (f *Field) HandleInputWithBounds(bounds image.Rectangle) (handled bool, err error) {
 	f.bounds = bounds
-	f.handled = false
 	handled, err = f.handleInput()
-	if handled {
-		f.handled = true
-	}
 	return
 }
 
@@ -398,7 +328,6 @@ func (f *Field) SetSelection(startInBytes, endInBytes int) {
 	}
 	f.selectionStartInBytes = newStart
 	f.selectionEndInBytes = newEnd
-	f.bumpChangedAt()
 }
 
 // Text returns the current text.
@@ -436,14 +365,6 @@ func (f *Field) WriteTextTo(w io.Writer) (int64, error) {
 	return f.pieceTable.WriteTo(w)
 }
 
-// WriteText writes the current text to w.
-//
-// Deprecated: use [Field.WriteTextTo] instead.
-func (f *Field) WriteText(w io.Writer) error {
-	_, err := f.WriteTextTo(w)
-	return err
-}
-
 // WriteTextRangeTo writes the bytes of the current text in [startInBytes, endInBytes) to w.
 // startInBytes and endInBytes are clamped to [0, TextLengthInBytes()].
 // If the clamped start is not less than the clamped end, nothing is written.
@@ -453,14 +374,6 @@ func (f *Field) WriteText(w io.Writer) error {
 // Any error encountered during the write is also returned.
 func (f *Field) WriteTextRangeTo(w io.Writer, startInBytes, endInBytes int) (int64, error) {
 	return f.pieceTable.writeRangeTo(w, startInBytes, endInBytes)
-}
-
-// WriteTextRange writes the bytes of the current text in [startInBytes, endInBytes) to w.
-//
-// Deprecated: use [Field.WriteTextRangeTo] instead.
-func (f *Field) WriteTextRange(w io.Writer, startInBytes, endInBytes int) error {
-	_, err := f.WriteTextRangeTo(w, startInBytes, endInBytes)
-	return err
 }
 
 // WriteTextForRenderingTo writes the text for rendering to w.
@@ -473,14 +386,6 @@ func (f *Field) WriteTextForRenderingTo(w io.Writer) (int64, error) {
 		return f.pieceTable.writeToWithInsertion(w, f.state.Text, f.selectionStartInBytes, f.selectionEndInBytes)
 	}
 	return f.pieceTable.WriteTo(w)
-}
-
-// WriteTextForRendering writes the text for rendering to w.
-//
-// Deprecated: use [Field.WriteTextForRenderingTo] instead.
-func (f *Field) WriteTextForRendering(w io.Writer) error {
-	_, err := f.WriteTextForRenderingTo(w)
-	return err
 }
 
 // WriteTextForRenderingRangeTo writes the bytes of the rendering text in [startInBytes, endInBytes) to w.
@@ -498,14 +403,6 @@ func (f *Field) WriteTextForRenderingRangeTo(w io.Writer, startInBytes, endInByt
 		return f.pieceTable.writeRangeToWithInsertion(w, f.state.Text, f.selectionStartInBytes, f.selectionEndInBytes, startInBytes, endInBytes)
 	}
 	return f.pieceTable.writeRangeTo(w, startInBytes, endInBytes)
-}
-
-// WriteTextForRenderingRange writes the bytes of the rendering text in [startInBytes, endInBytes) to w.
-//
-// Deprecated: use [Field.WriteTextForRenderingRangeTo] instead.
-func (f *Field) WriteTextForRenderingRange(w io.Writer, startInBytes, endInBytes int) error {
-	_, err := f.WriteTextForRenderingRangeTo(w, startInBytes, endInBytes)
-	return err
 }
 
 // ResetText resets the text.
